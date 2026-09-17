@@ -17,7 +17,7 @@ export class RpcServer implements OnApplicationBootstrap, OnModuleDestroy {
   private rpc?: HyperswarmRpc;
   private server?: HyperswarmRpcServer;
 
-  constructor(private readonly config: ConfigService<AppConfig, true>) { }
+  constructor(private readonly config: ConfigService<AppConfig, true>) {}
 
   respond(method: string, handler: RpcMethodHandler): void {
     this.handlers.set(method, handler);
