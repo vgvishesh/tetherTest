@@ -3,7 +3,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 
 import { Currency, CurrencyDocument } from './price.schema';
-import { RecordCurrencyDto } from 'src/prices/dto/record-price.dto';
+import { RecordCurrencyDto } from '../prices/dto/record-price.dto';
 
 @Injectable()
 export class PriceRepository {

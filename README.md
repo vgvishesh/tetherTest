@@ -1,98 +1,150 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# price-aggregator
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+Aggregates top-5 currency prices across the top-3 CoinGecko markets, denominates them
+in USDT, stores them in MongoDB, and exposes the stored data over **REST** and
+**Hyperswarm RPC**. Both servers run in the same process.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## Setup
 
-## Description
-
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
-
-## Project setup
+Requires Node.js 20.19+ (Mongoose 9's floor) and a reachable MongoDB.
 
 ```bash
-$ npm install
+npm install
+cp .env.example .env   # then set COINGECKO_API_KEY
+npm run start:dev      # or: npm run build && npm run start:prod
 ```
 
-## Compile and run the project
+On boot the app logs the HTTP port and the RPC public key:
+
+```
+[RpcServer] Registered RPC method getLatestPrices
+[RpcServer] Registered RPC method getHistoricalPrices
+[RpcServer] RPC server listening on e734ea6c...6b58
+```
+
+Aggregation runs on a timer (`AGGREGATION_INTERVAL_MS`) once the app has booted;
+each run writes a snapshot to `TopCurrencies` and appends points to `PriceHistory`.
+
+## REST API
+
+Base URL `http://localhost:$PORT`.
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `POST` | `/prices/run-aggregation` | Starts an aggregation run, returns its `runId` |
+| `GET` | `/prices/run-status/:runId` | `pending` \| `running` \| `completed` \| `failed` \| `invalid` |
+| `GET` | `/prices/top-currencies` | Latest snapshot per currency, by market cap |
+| `GET` | `/prices/history/:symbol?fromDate=&toDate=` | Stored price points in a range, newest first |
 
 ```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+curl -X POST localhost:3000/prices/run-aggregation
+curl localhost:3000/prices/top-currencies
+curl "localhost:3000/prices/history/btc?fromDate=2026-09-17T00:00:00.000Z&toDate=2026-09-18T00:00:00.000Z"
 ```
 
-## Run tests
+`fromDate`/`toDate` are required and accept anything `new Date(string)` parses —
+use ISO 8601 with an explicit `Z` (`2026-09-17T00:00:00.000Z`). A bare
+`2026-09-17` is UTC midnight; a zone-less `2026-09-17T00:00:00` is read in the
+server's local time. Epoch milliseconds are rejected. The range is inclusive at
+both ends, symbol case does not matter, and unknown query params are rejected
+with `400`.
+
+## Hyperswarm RPC
+
+Requests and responses are JSON buffers over [`@hyperswarm/rpc`](https://www.npmjs.com/package/@hyperswarm/rpc).
+
+| Method | Payload | Returns |
+| --- | --- | --- |
+| `getLatestPrices` | `{ pairs: string[] }` | Most recent point per symbol |
+| `getHistoricalPrices` | `{ pairs: string[], from: number, to: number }` | All points in the range, newest first per symbol |
+
+`pairs` are currency symbols (`["btc", "eth"]`), matched case-insensitively
+against the `PriceHistory` collection; symbols with no stored data are simply
+absent from the response. `from`/`to` are epoch milliseconds, inclusive. Both
+methods return `PricePointDto[]`:
+
+```json
+[{ "symbol": "btc", "price": 110.5, "timestamp": 1789646763755 }]
+```
+
+Client:
+
+```js
+const RPC = require('@hyperswarm/rpc');
+
+const rpc = new RPC();
+const publicKey = Buffer.from('<public key from the server log>', 'hex');
+
+const call = async (method, payload) => {
+  const raw = await rpc.request(publicKey, method, Buffer.from(JSON.stringify(payload)));
+  return JSON.parse(raw.toString('utf8'));
+};
+
+await call('getLatestPrices', { pairs: ['btc', 'eth'] });
+await call('getHistoricalPrices', { pairs: ['btc'], from: Date.now() - 3600_000, to: Date.now() });
+
+await rpc.destroy();
+```
+
+Two things to know:
+
+- The keypair is generated per boot, so the public key changes on every restart.
+  Clients read it from the server log.
+- `protomux-rpc` masks handler errors on the wire as `REQUEST_ERROR: Request
+  failed`; the real reason (e.g. `Invalid RPC payload: pairs should not be
+  empty`) is only in the server log.
+
+## Environment variables
+
+Loaded from `.env.local`, then `.env`, and validated at boot (`src/config/env.validation.ts`).
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `NODE_ENV` | `development` | `development` \| `production` \| `test` |
+| `PORT` | `3000` | HTTP port |
+| `MONGODB_URI` | `mongodb://localhost:27017/price-aggregator` | Connection string |
+| `MONGODB_DB_NAME` | from URI | Overrides the database in the URI |
+| `MONGODB_MAX_POOL_SIZE` | `10` | Mongoose connection pool size |
+| `MONGODB_SERVER_SELECTION_TIMEOUT_MS` | `5000` | Fail fast when Mongo is unreachable |
+| `MONGODB_AUTO_INDEX` | `true` outside production | Sync indexes on boot |
+| `COINGECKO_BASE_URL` | `https://api.coingecko.com/` | Demo keys only work against this host |
+| `COINGECKO_API_KEY` | — | Free demo key; without it you share an IP-wide quota and hit `429` fast |
+| `COINGECKO_TIMEOUT_MS` | `10000` | Per-request HTTP timeout |
+| `COINGECKO_MAX_RETRIES` | `5` | Retries after the first attempt |
+| `COINGECKO_RETRY_BASE_DELAY_MS` | `1000` | Backoff base; the delay doubles each retry |
+| `AGGREGATION_ENABLED` | `true` | `false` boots without the scheduler (manual runs only) |
+| `AGGREGATION_INTERVAL_MS` | `30000` | Gap between scheduled runs; minimum `1000` |
+| `RPC_ENABLED` | `true` | `false` boots without the RPC server |
+| `RPC_BOOTSTRAP` | public DHT | Comma-separated `host:port` DHT bootstrap nodes |
+
+## Tests
 
 ```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
+npm test              # 35 unit tests, all external deps mocked
+npm run test:cov      # with a coverage report
+npm run test:watch    # re-run on change
+npm run lint
 ```
 
-## Deployment
+No MongoDB or CoinGecko access is needed — `CoingeckoService` is driven through a
+mocked `HttpService`, and `PricesService` through mocked repositories.
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+| Suite | Covers |
+| --- | --- |
+| `coingecko.service.spec.ts` | Response mapping to camelCase models, USDT-pair filtering, stale/anomaly rejection, retry with exponential backoff |
+| `prices.service.spec.ts` | Aggregation fallbacks when coins are missing from the top-3 markets, run status transitions |
+| `app.controller.spec.ts` | Scaffold smoke test |
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+### If watchman errors appear
 
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+Jest is configured with `"watchman": false` in `package.json`. A stale Homebrew
+`watchman` (linked against an `icu4c` version that no longer exists) otherwise
+aborts the run before any test executes:
+
+```
+Watchman: watchman --no-pretty get-sockname returned with exit code=null, signal=SIGABRT
+dyld: Library not loaded: /opt/homebrew/opt/icu4c/lib/libicudata.73.dylib
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
-
-## Resources
-
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+Repair it with `brew reinstall watchman`, or leave the flag as-is — Jest's own
+crawler is used instead, which is fine at this project size.

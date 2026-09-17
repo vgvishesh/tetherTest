@@ -3,12 +3,12 @@ import type { RecordCurrencyDto } from './dto/record-price.dto';
 import type { RecordPricePointDto } from './dto/record-price-point.dto';
 import type { PricePointDto } from './dto/price-point.dto';
 import { AggregationStatus } from '../database/aggregation-run.schema';
-import { CoingeckoService } from 'src/coingecko/coingecko.service';
-import { MarketCoin } from 'src/coingecko/models';
-import { PriceRepository } from 'src/database/price.repo';
-import { RunRepository } from 'src/database/run.repo';
-import { PriceHistoryRepository } from 'src/database/price-history.repo';
-import { PriceHistory } from 'src/database/price-history.schema';
+import { CoingeckoService } from '../coingecko/coingecko.service';
+import { MarketCoin } from '../coingecko/models';
+import { PriceRepository } from '../database/price.repo';
+import { RunRepository } from '../database/run.repo';
+import { PriceHistoryRepository } from '../database/price-history.repo';
+import { PriceHistory } from '../database/price-history.schema';
 
 export interface AggregatedPrice {
   symbol: string;
@@ -80,6 +80,14 @@ export class PricesService {
     const top5Coins = await this.coingeckoService.getCoinsFromMarket(5);
     const top3Markets = await this.coingeckoService.getTopNMarkets(3);
 
+    top5Coins.forEach((x) => {
+      coinPriceMap.set(x.id, {
+        sourceCount: 1,
+        total: x.currentPrice,
+        info: x,
+      });
+    });
+
     for (const market of top3Markets) {
       const marketPrices = await this.coingeckoService.getMarketPrices(
         top5Coins.map((coin) => coin.id),
@@ -88,13 +96,6 @@ export class PricesService {
       );
 
       marketPrices.currencyPrices.forEach((currency) => {
-        if (!coinPriceMap.has(currency.id)) {
-          coinPriceMap.set(currency.id, {
-            total: 0,
-            sourceCount: 0,
-            info: top5Coins.find((coin) => coin.id === currency.id)!,
-          });
-        }
         coinPriceMap.get(currency.id)!.total += currency.price;
         coinPriceMap.get(currency.id)!.sourceCount++;
       });

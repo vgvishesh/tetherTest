@@ -39,8 +39,6 @@ export class RpcServer implements OnApplicationBootstrap, OnModuleDestroy {
       return;
     }
 
-    // No seed: Hyperswarm generates a fresh keypair per boot, so the public
-    // key logged below changes across restarts.
     this.rpc = new HyperswarmRpc({ bootstrap });
     this.server = this.rpc.createServer();
 
