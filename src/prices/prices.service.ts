@@ -1,10 +1,14 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { RecordCurrencyDto } from './dto/record-price.dto';
+import type { RecordPricePointDto } from './dto/record-price-point.dto';
+import type { PricePointDto } from './dto/price-point.dto';
 import { AggregationStatus } from '../database/aggregation-run.schema';
 import { CoingeckoService } from 'src/coingecko/coingecko.service';
 import { MarketCoin } from 'src/coingecko/models';
 import { PriceRepository } from 'src/database/price.repo';
 import { RunRepository } from 'src/database/run.repo';
+import { PriceHistoryRepository } from 'src/database/price-history.repo';
+import { PriceHistory } from 'src/database/price-history.schema';
 
 export interface AggregatedPrice {
   symbol: string;
@@ -31,9 +35,10 @@ export class PricesService {
 
   constructor(
     private readonly priceRepository: PriceRepository,
+    private readonly priceHistoryRepository: PriceHistoryRepository,
     private readonly runRepository: RunRepository,
     private readonly coingeckoService: CoingeckoService,
-  ) { }
+  ) {}
 
   isRunInProgress(): boolean {
     return this.activeRun !== null;
@@ -97,6 +102,8 @@ export class PricesService {
 
     const latestTetherPrice = await this.coingeckoService.getTetherPrice();
 
+    const pricePoints: RecordPricePointDto[] = [];
+
     for (const [id, coin] of coinPriceMap) {
       const averageUSDPrice = coin.total / coin.sourceCount;
       const currentPriceInTether = averageUSDPrice / latestTetherPrice.price;
@@ -108,7 +115,14 @@ export class PricesService {
         marketCapRank: coin.info.marketCapRank,
         totalVolume: coin.info.totalVolume,
       });
+      pricePoints.push({
+        id,
+        symbol: coin.info.symbol,
+        price: currentPriceInTether,
+      });
     }
+
+    await this.priceHistoryRepository.record(pricePoints);
 
     await this.runRepository.updateRunStatus(
       runId,
@@ -119,4 +133,46 @@ export class PricesService {
   async findTopCurrencies(): Promise<RecordCurrencyDto[]> {
     return this.priceRepository.findTopCurrencies();
   }
+
+  async findPriceHistory(
+    fromDate: Date,
+    toDate: Date,
+    symbol: string,
+  ): Promise<PriceHistory[]> {
+    return this.priceHistoryRepository.find(fromDate, toDate, symbol);
+  }
+
+  async getLatestPrices(pairs: string[]): Promise<PricePointDto[]> {
+    const points = await this.priceHistoryRepository.findLatestBySymbols(
+      normalizeSymbols(pairs),
+    );
+    return points.map(toPricePoint);
+  }
+
+  async getHistoricalPrices(
+    pairs: string[],
+    from: number,
+    to: number,
+  ): Promise<PricePointDto[]> {
+    const points = await this.priceHistoryRepository.findBySymbols(
+      normalizeSymbols(pairs),
+      new Date(from),
+      new Date(to),
+    );
+    return points.map(toPricePoint);
+  }
+}
+
+function normalizeSymbols(pairs: string[]): string[] {
+  return [...new Set(pairs.map((pair) => pair.trim().toLowerCase()))].filter(
+    (pair) => pair.length > 0,
+  );
+}
+
+function toPricePoint(point: PriceHistory): PricePointDto {
+  return {
+    symbol: point.symbol,
+    price: point.price,
+    timestamp: point.createdAt.getTime(),
+  };
 }

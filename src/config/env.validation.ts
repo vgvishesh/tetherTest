@@ -67,6 +67,16 @@ class EnvironmentVariables {
   @Min(100)
   COINGECKO_TIMEOUT_MS?: number;
 
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  COINGECKO_MAX_RETRIES?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  COINGECKO_RETRY_BASE_DELAY_MS?: number;
+
   // A sub-second cadence would stampede the CoinGecko quota, so floor it.
   @IsOptional()
   @IsInt()
@@ -76,6 +86,14 @@ class EnvironmentVariables {
   @IsOptional()
   @IsBoolean()
   AGGREGATION_ENABLED?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  RPC_ENABLED?: boolean;
+
+  @IsOptional()
+  @IsString()
+  RPC_BOOTSTRAP?: string;
 }
 
 export function validate(config: Record<string, unknown>) {

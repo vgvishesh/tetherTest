@@ -1,4 +1,5 @@
 import { HttpService } from '@nestjs/axios';
+import { ConfigService } from '@nestjs/config';
 import {
   Injectable,
   Logger,
@@ -6,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { AxiosError } from 'axios';
 import { firstValueFrom } from 'rxjs';
+import type { AppConfig } from '../config/configuration';
 import type { Market, MarketCoin, MarketPrice, TetherPrice } from './models';
 import type {
   CoinMarketsApiResponse,
@@ -16,19 +18,22 @@ import type {
 
 const API_PREFIX = '/api/v3';
 
-/** CoinGecko rejects /simple/price without this parameter (HTTP 422). */
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const isRetryable = (status?: number) =>
+  status === undefined || status === 429 || status >= 500;
+
 const TETHER_ID = 'tether';
 const TETHER_VS_CURRENCY = 'usd';
-
-/** Exchange tickers list one coin against many targets; we want the USDT pair. */
-const DEFAULT_TARGET = 'USDT';
-const DEFAULT_MARKET_ID = 'gdax';
 
 @Injectable()
 export class CoingeckoService {
   private readonly logger = new Logger(CoingeckoService.name);
 
-  constructor(private readonly http: HttpService) {}
+  constructor(
+    private readonly http: HttpService,
+    private readonly config: ConfigService<AppConfig, true>,
+  ) {}
 
   /**
    * Top `topK` coins by market cap, priced in `priceCurrency`.
@@ -101,8 +106,8 @@ export class CoingeckoService {
    */
   async getMarketPrices(
     currencies: string[],
-    marketId = DEFAULT_MARKET_ID,
-    target = DEFAULT_TARGET,
+    marketId: string,
+    target: string,
   ): Promise<MarketPrice> {
     if (currencies.length === 0) {
       return { marketId, currencyPrices: [] };
@@ -129,27 +134,46 @@ export class CoingeckoService {
     return { marketId, currencyPrices };
   }
 
+  /**
+   * Retries transient failures with an exponential backoff and only returns
+   * once a call succeeds or the retry budget is spent.
+   */
   private async get<T>(
     path: string,
     params: Record<string, string | number>,
   ): Promise<T> {
-    try {
-      const response = await firstValueFrom(
-        this.http.get<T>(`${API_PREFIX}${path}`, { params }),
-      );
-      return response.data;
-    } catch (error) {
-      const axiosError = error as AxiosError;
-      const status = axiosError.response?.status;
+    const { maxRetries, retryBaseDelayMs } = this.config.get('coingecko', {
+      infer: true,
+    });
 
-      this.logger.error(
-        `GET ${path} failed${status ? ` (HTTP ${status})` : ''}: ${axiosError.message}`,
-      );
+    let status: number | undefined;
 
-      // 429 is the common case on the keyless tier; surface it as retryable.
-      throw new ServiceUnavailableException(
-        `CoinGecko request failed${status ? ` with status ${status}` : ''}`,
-      );
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const response = await firstValueFrom(
+          this.http.get<T>(`${API_PREFIX}${path}`, { params }),
+        );
+        return response.data;
+      } catch (error) {
+        status = (error as AxiosError).response?.status;
+
+        if (!isRetryable(status) || attempt === maxRetries) {
+          break;
+        }
+
+        const delayMs = retryBaseDelayMs * 2 ** attempt;
+        this.logger.warn(
+          `GET ${path} failed (HTTP ${status ?? 'no response'}), retry ${attempt + 1}/${maxRetries} in ${delayMs}ms`,
+        );
+        await sleep(delayMs);
+      }
     }
+
+    this.logger.error(
+      `GET ${path} failed after ${maxRetries + 1} attempts (HTTP ${status ?? 'no response'})`,
+    );
+    throw new ServiceUnavailableException(
+      `CoinGecko request failed${status ? ` with status ${status}` : ''}`,
+    );
   }
 }

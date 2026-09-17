@@ -10,6 +10,8 @@ export interface CoingeckoConfig {
   baseUrl: string;
   apiKey?: string;
   timeoutMs: number;
+  maxRetries: number;
+  retryBaseDelayMs: number;
 }
 
 export interface AggregationConfig {
@@ -19,12 +21,18 @@ export interface AggregationConfig {
   enabled: boolean;
 }
 
+export interface RpcConfig {
+  enabled: boolean;
+  bootstrap?: string[];
+}
+
 export interface AppConfig {
   nodeEnv: string;
   port: number;
   database: DatabaseConfig;
   coingecko: CoingeckoConfig;
   aggregation: AggregationConfig;
+  rpc: RpcConfig;
 }
 
 /**
@@ -54,12 +62,24 @@ export default (): AppConfig => {
       baseUrl: process.env.COINGECKO_BASE_URL ?? 'https://api.coingecko.com/',
       apiKey: process.env.COINGECKO_API_KEY || undefined,
       timeoutMs: Number(process.env.COINGECKO_TIMEOUT_MS ?? 10000),
+      maxRetries: Number(process.env.COINGECKO_MAX_RETRIES ?? 5),
+      retryBaseDelayMs: Number(
+        process.env.COINGECKO_RETRY_BASE_DELAY_MS ?? 1000,
+      ),
     },
     aggregation: {
       intervalMs: Number(process.env.AGGREGATION_INTERVAL_MS ?? 30000),
       enabled: process.env.AGGREGATION_ENABLED
         ? process.env.AGGREGATION_ENABLED === 'true'
         : true,
+    },
+    rpc: {
+      enabled: process.env.RPC_ENABLED
+        ? process.env.RPC_ENABLED === 'true'
+        : true,
+      bootstrap: process.env.RPC_BOOTSTRAP
+        ? process.env.RPC_BOOTSTRAP.split(',').map((node) => node.trim())
+        : undefined,
     },
   };
 };

@@ -1,4 +1,5 @@
 import { HttpService } from '@nestjs/axios';
+import { ConfigService } from '@nestjs/config';
 import { Logger, ServiceUnavailableException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { AxiosError, AxiosResponse } from 'axios';
@@ -57,6 +58,8 @@ describe('CoingeckoService', () => {
   let service: CoingeckoService;
   let get: jest.Mock;
 
+  const MAX_RETRIES = 3;
+
   /** Query params the service sent on a given call. */
   const paramsOf = (call = 0): Record<string, string | number> => {
     const calls = get.mock.calls as Array<
@@ -71,6 +74,13 @@ describe('CoingeckoService', () => {
       providers: [
         CoingeckoService,
         { provide: HttpService, useValue: { get } },
+        {
+          provide: ConfigService,
+          useValue: {
+            // Zero base delay keeps the retry tests instant.
+            get: () => ({ maxRetries: MAX_RETRIES, retryBaseDelayMs: 0 }),
+          },
+        },
       ],
     }).compile();
 
@@ -257,7 +267,11 @@ describe('CoingeckoService', () => {
     it('returns a MarketPrice keyed by marketId with USDT-only prices', async () => {
       get.mockReturnValue(of(okResponse(EXCHANGE_TICKERS_FIXTURE)));
 
-      const result = await service.getMarketPrices(['bitcoin', 'ethereum']);
+      const result = await service.getMarketPrices(
+        ['bitcoin', 'ethereum'],
+        'gdax',
+        'USDT',
+      );
 
       expect(result).toEqual({
         marketId: 'gdax',
@@ -271,7 +285,11 @@ describe('CoingeckoService', () => {
     it('returns correct types throughout the nested shape', async () => {
       get.mockReturnValue(of(okResponse(EXCHANGE_TICKERS_FIXTURE)));
 
-      const result = await service.getMarketPrices(['bitcoin', 'ethereum']);
+      const result = await service.getMarketPrices(
+        ['bitcoin', 'ethereum'],
+        'gdax',
+        'USDT',
+      );
 
       expect(typeof result.marketId).toBe('string');
       expect(Array.isArray(result.currencyPrices)).toBe(true);
@@ -285,7 +303,7 @@ describe('CoingeckoService', () => {
     it('drops non-USDT targets for the same coin', async () => {
       get.mockReturnValue(of(okResponse(EXCHANGE_TICKERS_FIXTURE)));
 
-      const result = await service.getMarketPrices(['bitcoin']);
+      const result = await service.getMarketPrices(['bitcoin'], 'gdax', 'USDT');
 
       expect(result.currencyPrices).toEqual([
         { id: 'bitcoin', price: 76673.35 },
@@ -318,11 +336,11 @@ describe('CoingeckoService', () => {
         ),
       );
 
-      const result = await service.getMarketPrices([
-        'bitcoin',
-        'ethereum',
-        'ripple',
-      ]);
+      const result = await service.getMarketPrices(
+        ['bitcoin', 'ethereum', 'ripple'],
+        'gdax',
+        'USDT',
+      );
 
       expect(result.currencyPrices).toEqual([{ id: 'ripple', price: 1.3 }]);
     });
@@ -331,7 +349,11 @@ describe('CoingeckoService', () => {
       get.mockReturnValue(of(okResponse(EXCHANGE_TICKERS_FIXTURE)));
 
       // Coinbase has no BNB/USDT pair; it must be absent, not zero-priced.
-      const result = await service.getMarketPrices(['bitcoin', 'binancecoin']);
+      const result = await service.getMarketPrices(
+        ['bitcoin', 'binancecoin'],
+        'gdax',
+        'USDT',
+      );
 
       expect(result.currencyPrices.map((c) => c.id)).toEqual(['bitcoin']);
     });
@@ -339,7 +361,7 @@ describe('CoingeckoService', () => {
     it('requests the given market with comma-separated coin ids', async () => {
       get.mockReturnValue(of(okResponse(EXCHANGE_TICKERS_FIXTURE)));
 
-      await service.getMarketPrices(['bitcoin', 'ethereum'], 'binance');
+      await service.getMarketPrices(['bitcoin', 'ethereum'], 'binance', 'USDT');
 
       expect(get).toHaveBeenCalledWith('/api/v3/exchanges/binance/tickers', {
         params: { coin_ids: 'bitcoin,ethereum' },
@@ -347,10 +369,103 @@ describe('CoingeckoService', () => {
     });
 
     it('short-circuits without calling the API for an empty list', async () => {
-      const result = await service.getMarketPrices([]);
+      const result = await service.getMarketPrices([], 'gdax', 'USDT');
 
       expect(result).toEqual({ marketId: 'gdax', currencyPrices: [] });
       expect(get).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('retry with exponential backoff', () => {
+    const axiosErrorWith = (status?: number) => {
+      const error = new AxiosError('Request failed');
+      if (status !== undefined) {
+        error.response = { status } as AxiosResponse;
+      }
+      return error;
+    };
+
+    beforeEach(() => {
+      jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    });
+
+    it('retries a 429 and returns the eventual success', async () => {
+      get
+        .mockReturnValueOnce(throwError(() => axiosErrorWith(429)))
+        .mockReturnValueOnce(throwError(() => axiosErrorWith(429)))
+        .mockReturnValueOnce(of(okResponse(COINS_MARKETS_FIXTURE)));
+
+      const result = await service.getCoinsFromMarket(2);
+
+      expect(result).toHaveLength(2);
+      expect(get).toHaveBeenCalledTimes(3);
+    });
+
+    it('does not return control to the caller until the budget is spent', async () => {
+      get.mockReturnValue(throwError(() => axiosErrorWith(429)));
+
+      await expect(service.getCoinsFromMarket(5)).rejects.toBeInstanceOf(
+        ServiceUnavailableException,
+      );
+      // One initial attempt plus maxRetries retries.
+      expect(get).toHaveBeenCalledTimes(MAX_RETRIES + 1);
+    });
+
+    it('retries 5xx responses', async () => {
+      get
+        .mockReturnValueOnce(throwError(() => axiosErrorWith(503)))
+        .mockReturnValueOnce(of(okResponse(EXCHANGES_FIXTURE)));
+
+      await expect(service.getTopNMarkets(3)).resolves.toHaveLength(3);
+      expect(get).toHaveBeenCalledTimes(2);
+    });
+
+    it('retries when there is no response at all (network or timeout)', async () => {
+      get
+        .mockReturnValueOnce(throwError(() => axiosErrorWith(undefined)))
+        .mockReturnValueOnce(of(okResponse({ tether: { usd: 0.999 } })));
+
+      await expect(service.getTetherPrice()).resolves.toEqual({
+        price: 0.999,
+      });
+      expect(get).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not retry a 4xx that will never succeed', async () => {
+      get.mockReturnValue(throwError(() => axiosErrorWith(422)));
+
+      await expect(service.getTetherPrice()).rejects.toBeInstanceOf(
+        ServiceUnavailableException,
+      );
+      // Every request counts against the rate limit, so 422 fails immediately.
+      expect(get).toHaveBeenCalledTimes(1);
+    });
+
+    it('backs off exponentially between attempts', async () => {
+      jest.useFakeTimers();
+      const delays: number[] = [];
+      jest
+        .spyOn(global, 'setTimeout')
+        .mockImplementation((fn: () => void, ms?: number) => {
+          delays.push(ms ?? 0);
+          fn();
+          return 0 as unknown as NodeJS.Timeout;
+        });
+
+      const base = 100;
+      jest
+        .spyOn(service['config'], 'get')
+        .mockReturnValue({ maxRetries: 4, retryBaseDelayMs: base });
+      get.mockReturnValue(throwError(() => axiosErrorWith(429)));
+
+      await expect(service.getCoinsFromMarket(5)).rejects.toBeInstanceOf(
+        ServiceUnavailableException,
+      );
+
+      expect(delays).toEqual([base, base * 2, base * 4, base * 8]);
+      jest.restoreAllMocks();
+      jest.useRealTimers();
     });
   });
 

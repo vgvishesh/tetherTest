@@ -16,8 +16,6 @@ import { CoingeckoService } from './coingecko.service';
           timeout: coingecko.timeoutMs,
           headers: {
             accept: 'application/json',
-            // Demo keys only work against api.coingecko.com; Pro keys use a
-            // different host and header (error 10011 if they are crossed).
             ...(coingecko.apiKey
               ? { 'x-cg-demo-api-key': coingecko.apiKey }
               : {}),

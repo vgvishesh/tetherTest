@@ -10,14 +10,15 @@ import { PricesService } from './prices.service';
 
 @Injectable()
 export class AggregationScheduler
-  implements OnApplicationBootstrap, OnModuleDestroy {
+  implements OnApplicationBootstrap, OnModuleDestroy
+{
   private readonly logger = new Logger(AggregationScheduler.name);
   private timer?: NodeJS.Timeout;
 
   constructor(
     private readonly prices: PricesService,
     private readonly config: ConfigService<AppConfig, true>,
-  ) { }
+  ) {}
 
   onApplicationBootstrap(): void {
     const { enabled, intervalMs } = this.config.get('aggregation', {
